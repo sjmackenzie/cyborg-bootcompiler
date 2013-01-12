@@ -33,7 +33,7 @@ import util._
 object Config {
   /** Mode */
   object Mode extends Enumeration {
-    val Module, BaseEnv, Linker = Value
+    val Module, BaseEnv = Value
   }
 
   /** Mode */
@@ -42,8 +42,7 @@ object Config {
 
 case class Config(
     mode: Config.Mode = Config.Mode.Module,
-    outputStream: () => PrintStream = () => Console.out,
-    headers: List[String] = List("mozart.hh"),
+    outputStream: () => BufferedOutputStream = null,
     moduleDefs: List[String] = Nil,
     baseDeclsFileName: String = "",
     defines: Set[String] = Set.empty,
@@ -60,14 +59,9 @@ object Main {
         flag("baseenv", "switch to base environment mode") {
           c => c.copy(mode = Config.Mode.BaseEnv)
         },
-        flag("linker", "switch to linker mode") {
-          c => c.copy(mode = Config.Mode.Linker)
-        },
         opt("o", "output", "output file") {
-          (v, c) => c.copy(outputStream = () => new PrintStream(v))
-        },
-        opt("h", "header", "additional C++ header file to include") {
-          (v, c) => c.copy(headers = v :: c.headers)
+          (v, c) => c.copy(outputStream =
+            () => new BufferedOutputStream(new FileOutputStream(v)))
         },
         opt("m", "module", "module definition file or directory") {
           (v, c) => c.copy(moduleDefs = v :: c.moduleDefs)
@@ -78,7 +72,7 @@ object Main {
         opt("D", "define", "add a symbol to the conditional defines") {
           (v, c) => c.copy(defines = c.defines + v)
         },
-        arglist("<files>", "input files (for linker, main file must be first)") {
+        arglist("<files>", "input files") {
           (v, c) => c.copy(fileNames = v :: c.fileNames)
         }
       )
@@ -88,7 +82,6 @@ object Main {
     optParser.parse(args, Config()) map { config0 =>
       // OK, we're good to go
       val config = config0.copy(
-          headers = config0.headers.reverse,
           fileNames = config0.fileNames.reverse)
 
       try {
@@ -97,8 +90,6 @@ object Main {
             mainModule(config)
           case Config.Mode.BaseEnv =>
             mainBaseEnv(config)
-          case Config.Mode.Linker =>
-            mainLinker(config)
         }
       } catch {
         case th: Throwable =>
@@ -124,14 +115,13 @@ object Main {
     val (program, _) = createProgram(moduleDefs, Some(baseDeclsFileName))
 
     val fileName = fileNames.head
-    val url = fileNameToURL(fileName)
     val functor = parseExpression(readerForFile(fileName), new File(fileName),
         defines)
 
-    ProgramBuilder.buildModuleProgram(program, url, functor)
+    ProgramBuilder.buildModuleProgram(program, functor)
     compile(program, fileName)
 
-    program.produceCC(new Output(outputStream()), urlToProcName(url), headers)
+    Serializer.serialize(program, outputStream())
   }
 
   /** Performs the BaseEnv mode */
@@ -148,67 +138,9 @@ object Main {
     ProgramBuilder.buildBaseEnvProgram(program, bootModules, functors)
     compile(program, "the base environment")
 
-    program.produceCC(new Output(outputStream()), "createBaseEnv", headers)
+    Serializer.serialize(program, outputStream())
 
     writeFileLines(new File(baseDeclsFileName), program.baseDeclarations)
-  }
-
-  /** Performs the Linker mode */
-  private def mainLinker(config: Config) {
-    import config._
-
-    val (program, _) = createProgram(moduleDefs, Some(baseDeclsFileName))
-
-    val urls = fileNames map fileNameToURL
-
-    ProgramBuilder.buildLinkerProgram(program, urls)
-    compile(program, "the linker")
-
-    val out = new Output(outputStream())
-    program.produceCC(out, "createRunThread", headers)
-
-    // Create the main() proc
-    import Output._
-
-    out << "\n"
-    out << "void createBaseEnv(VM vm, RichNode baseEnv, RichNode bootMM);\n"
-
-    for (url <- urls)
-      out << ("void %s(VM vm, RichNode baseEnv, RichNode bootMM);\n" %
-          urlToProcName(url))
-
-    out << """
-       |int main(int argc, char** argv) {
-       |  boostenv::BoostBasedVM boostBasedVM;
-       |  VM vm = boostBasedVM.vm;
-       |
-       |  if (argc >= 2) {
-       |    boostBasedVM.setApplicationURL(argv[1]);
-       |    boostBasedVM.setApplicationArgs(argc-2, argv+2);
-       |  } else {
-       |    boostBasedVM.setApplicationURL(u8"%s");
-       |    boostBasedVM.setApplicationArgs(0, nullptr);
-       |  }
-       |
-       |  UnstableNode baseEnv = OptVar::build(vm);
-       |  UnstableNode bootMM = OptVar::build(vm);
-       |
-       |  vm->getPropertyRegistry().registerConstantProp(
-       |    vm, MOZART_STR("internal.bootmm"), bootMM);
-       |
-       |  createBaseEnv(vm, baseEnv, bootMM);
-       |""".stripMargin % (urls.head)
-
-    for (url <- urls)
-      out << "  %s(vm, baseEnv, bootMM);\n" % urlToProcName(url)
-
-    out << """
-       |  boostBasedVM.run();
-       |
-       |  createRunThread(vm, baseEnv, bootMM);
-       |  boostBasedVM.run();
-       |}
-       |""".stripMargin
   }
 
   /** Creates a new Program */
@@ -297,36 +229,6 @@ object Main {
         new BufferedReader(new FileReader(fileName))))
   }
 
-  /** Builds a [[scala.util.parsing.input.PagedSeqReader]] for a resource
-   *
-   *  @param resourceName name of the resource to be read
-   */
-  private def readerForResource(resourceName: String) = {
-    new PagedSeqReader(PagedSeq.fromSource(io.Source.fromInputStream(
-        getClass.getResourceAsStream(resourceName))))
-  }
-
-  /** Returns the appropriate URL for a file name */
-  private def fileNameToURL(fileName: String) = {
-    val name = removeExt(new File(fileName).getName)
-
-    if (!SystemModules.isSystemModule(name)) name + ".ozf"
-    else "x-oz://system/" + name + ".ozf"
-  }
-
-  /** Returns the main proc name for registering a functor */
-  private def urlToProcName(url: String) = {
-    val name = removeExt(url.substring(url.lastIndexOf('/') + 1))
-
-    "createFunctor_" + name
-  }
-
-  /** Removes the extension from a file name */
-  private def removeExt(fileName: String) = {
-    if (!(fileName contains '.')) fileName
-    else fileName.substring(0, fileName.lastIndexOf('.'))
-  }
-
   /** Loads the definitions of builtin modules
    *
    *  @param prog program in which the modules must be loaded
@@ -379,7 +281,6 @@ object Main {
 
       for {
         M(bi) <- builtins
-        S(biFullCppGetter) = bi("fullCppGetter")
         S(biName) = bi("name")
         B(inlineable) = bi("inlineable")
         L(params) = bi("params")
@@ -396,7 +297,7 @@ object Main {
         }
 
         val builtin = new Builtin(
-            modName, biName, biFullCppGetter, paramKinds, inlineAs)
+            modName, biName, paramKinds, inlineAs)
 
         prog.builtins.register(builtin)
 

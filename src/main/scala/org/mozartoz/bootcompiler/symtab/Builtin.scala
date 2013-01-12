@@ -28,7 +28,6 @@ object Builtin {
 
 /** Builtin procedure of the host VM */
 class Builtin(val moduleName: String, val name: String,
-    val ccFullGetter: String,
     val paramKinds: List[Builtin.ParamKind],
     val inlineAs: Option[Int]) {
 

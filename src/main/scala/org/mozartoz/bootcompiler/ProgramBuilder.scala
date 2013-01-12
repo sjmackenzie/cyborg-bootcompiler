@@ -23,17 +23,26 @@ import transform._
 object ProgramBuilder extends TreeDSL with TransformUtils {
   val treeCopy = new TreeCopier
 
-  /** Builds a program that registers a user-defined module (i.e., a functor)
+  /** Builds a program that defines a regular functor
    *
-   *  Given a URL <url> and a functor <functor>, the whole program is
+   *  Given a functor expression <functor>, the whole program is
    *  straightforward:
    *  {{{
-   *  {<BootMM>.registerFunctor '<url>' <functor>}
+   *  local
+   *     <Base>
+   *  in
+   *     <Base> = {Boot_Property.get 'internal.boot.base' $ true}
+   *     <Result> = <functor>
+   *  end
    *  }}}
    */
-  def buildModuleProgram(prog: Program, url: String, functor: Expression) {
-    val registerProc = getBootMMProc(prog, "registerFunctor")
-    prog.rawCode = registerProc.call(OzAtom(url), functor)
+  def buildModuleProgram(prog: Program, functor: Expression) {
+    prog.rawCode = {
+      LOCAL (prog.baseEnvSymbol) IN {
+        (prog.baseEnvSymbol === getBootProperty(prog, "internal.boot.base")) ~
+        (prog.topLevelResultSymbol === functor)
+      }
+    }
   }
 
   /** Builds a program that creates the base environment
@@ -59,14 +68,16 @@ object ProgramBuilder extends TreeDSL with TransformUtils {
    *  All the base functors are merged together as a single functor, that we
    *  call the base functor and write <BaseFunctor> from here.
    *
+   *  The <BaseFunctor> must export an unbound variable under feature 'Base'.
+   *
    *  The program statement applies this functor, giving it as imports all
    *  the boot modules. These are looked up in the boot modules map.
-   *  The result of the application, which is the Base module, is stored in
-   *  the outer-global variable <Base>.
+   *  The result of this application is returned as the top-level result.
    *
    *  Hence the program looks like this:
    *  {{{
    *  local
+   *     <Base>
    *     Imports = 'import'(
    *        'Boot_ModA': <constant looked up in the boot modules map>
    *        ...
@@ -74,22 +85,8 @@ object ProgramBuilder extends TreeDSL with TransformUtils {
    *     )
    *  in
    *     <Base> = {<BaseFunctor>.apply Imports}
+   *     <Result> = <Base>
    *  end
-   *  }}}
-   *
-   *  The resulting Base module must export an unbound variable under feature
-   *  'Base', and the boot module manager it is supposed to have created under
-   *  feature '$BootMM'.
-   *
-   *  The program then binds <Base>.'Base' to <Base>, and registers the boot
-   *  modules in the boot module manager.
-   *
-   *  {{{
-   *  <Base>.'Base' = <Base>
-   *  <BootMM> = <Base>.'$BootMM'
-   *  {<BootMM>.registerModule 'x-oz://boot/ModA' <constant Boot ModA>}
-   *  ...
-   *  {<BootMM>.registerModule 'x-oz://boot/ModN' <constant Boot ModN>}
    *  }}}
    */
   def buildBaseEnvProgram(prog: Program,
@@ -122,24 +119,12 @@ object ProgramBuilder extends TreeDSL with TransformUtils {
       (baseFunctor dot OzAtom("apply")) call (imports, prog.baseEnvSymbol)
     }
 
-    // Fill in <Base>.'Base'
-    val bindBaseBaseStat = {
-      (prog.baseEnvSymbol dot OzAtom("Base")) === prog.baseEnvSymbol
-    }
-
-    // Register the boot modules
-    val registerBootModulesStat = CompoundStatement {
-      val registerProc = getBootMMProc(prog, "registerModule")
-      for ((url, module) <- bootModulesMap.toList) yield {
-        registerProc.call(OzAtom(url), module)
-      }
-    }
-
     // Put things together
     val wholeProgram = {
-      applyBaseFunctorStat ~
-      bindBaseBaseStat ~
-      registerBootModulesStat
+      LOCAL (prog.baseEnvSymbol) IN {
+        applyBaseFunctorStat ~
+        (prog.topLevelResultSymbol === prog.baseEnvSymbol)
+      }
     }
 
     prog.rawCode = wholeProgram
@@ -174,19 +159,8 @@ object ProgramBuilder extends TreeDSL with TransformUtils {
     }
   }
 
-  /** Builds a linker program
-   *
-   *  The statement that is built is straightforward:
-   *  {{{
-   *  {<BootMM>.run}
-   *  }}}
-   */
-  def buildLinkerProgram(prog: Program, urls: List[String]) {
-    val runProc = getBootMMProc(prog, "run")
-    prog.rawCode = runProc.call()
-  }
-
-  private def getBootMMProc(prog: Program, proc: String): Expression = {
-    Variable(prog.bootMMSymbol) dot OzAtom(proc)
+  private def getBootProperty(prog: Program, property: String) = {
+    prog.builtins.getProperty callExpr (
+        OzAtom(property), NestingMarker(), True())
   }
 }

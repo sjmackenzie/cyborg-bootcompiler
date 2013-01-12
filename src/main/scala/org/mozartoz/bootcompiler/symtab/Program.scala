@@ -35,14 +35,8 @@ class Program(val isBaseEnvironment: Boolean = false) {
   /** Variables declared by the base environment */
   val baseDeclarations = new ArrayBuffer[String]
 
-  /** Outer-global Base environment variable */
-  val baseEnvSymbol = new Symbol("<Base>", synthetic = true, global = true)
-
-  /** Outer-global BootMM variable */
-  val bootMMSymbol = new Symbol("<BootMM>", synthetic = true, global = true)
-
-  /** All the outer-global variables */
-  val outerGlobalSymbols = Seq(baseEnvSymbol, bootMMSymbol)
+  /** Global <Base> variable, which contains the base environment */
+  val baseEnvSymbol = new Symbol("<Base>", synthetic = true)
 
   /** Map of base symbols (only in base environment mode) */
   val baseSymbols = new HashMap[String, Symbol]
@@ -51,11 +45,10 @@ class Program(val isBaseEnvironment: Boolean = false) {
   val topLevelAbstraction =
     new Abstraction(NoAbstraction, "<TopLevel>", NoPosition)
 
-  {
-    // Impose the globals of the top-level abstraction to be the outer-globals
-    for (sym <- outerGlobalSymbols)
-      topLevelAbstraction.acquire(sym)
-  }
+  /** The <Result> parameter of the top-level abstraction */
+  val topLevelResultSymbol =
+    new Symbol("<Result>", synthetic = true, formal = true)
+  topLevelAbstraction.acquire(topLevelResultSymbol)
 
   /** After flattening, list of the abstractions */
   val abstractions = new ListBuffer[Abstraction]
@@ -93,78 +86,5 @@ class Program(val isBaseEnvironment: Boolean = false) {
         println()
       }
     }
-  }
-
-  /** Produces the C++ code that will execute the program */
-  def produceCC(out: Output, mainProcName: String,
-      headers: TraversableOnce[String] = List("mozart.hh")) {
-    import Output._
-
-    val codeAreas = abstractions map (_.codeArea)
-
-    for (header <- headers)
-      out << "#include <%s>\n" % header
-
-    out << """
-       |using namespace mozart;
-       |
-       |namespace {
-       |
-       |class Program {
-       |public:
-       |  Program(VM vm);
-       |
-       |  void createRunThread(RichNode baseEnv, RichNode bootMM);
-       |private:
-       |  VM vm;
-       |""".stripMargin
-
-    for (codeArea <- codeAreas) {
-      out << """
-         |  UnstableNode %s;
-         |  void %s();
-         |""".stripMargin % (codeArea.ccCodeArea, codeArea.ccCreateMethodName)
-    }
-
-    out << """
-       |};
-       |
-       |Program::Program(VM vm): vm(vm) {
-       |
-       |""".stripMargin
-
-    for (codeArea <- codeAreas.reverse)
-      out << "  %s();\n" % codeArea.ccCreateMethodName
-
-    out << """
-       |}
-       |
-       |void Program::createRunThread(RichNode baseEnv, RichNode bootMM) {
-       |  UnstableNode topLevelAbstraction = Abstraction::build(vm, 2, %s);
-       |  auto globalsArray =
-       |    RichNode(topLevelAbstraction).as<Abstraction>().getElementsArray();
-       |
-       |  globalsArray[0].init(vm, baseEnv);
-       |  globalsArray[1].init(vm, bootMM);
-       |
-       |  auto thread = new (vm) Thread(vm, vm->getTopLevelSpace(),
-       |                                topLevelAbstraction);
-       |  thread->setRaiseOnBlock(%s);
-       |}
-       |""".stripMargin % (
-           topLevelAbstraction.codeArea.ccCodeArea,
-           if (isBaseEnvironment) "true" else "false")
-
-    for (codeArea <- codeAreas)
-      codeArea.produceCC(out)
-
-    out << """
-       |} // namespace
-       |
-       |void %s(VM vm, RichNode baseEnv, RichNode bootMM) {
-       |  Program program(vm);
-       |  program.createRunThread(baseEnv, bootMM);
-       |}
-       |""".stripMargin % mainProcName
   }
 }

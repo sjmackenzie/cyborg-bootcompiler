@@ -46,9 +46,9 @@ class OzParser extends OzTokenParsers with PackratParsers
 
   lexical.reserved ++= List(
       "andthen", "at", "attr", "case", "catch", "choice",
-      "class", "cond", "declare", "define", "dis",
-      "div", "else", "elsecase", "elseif", "elseof", "end",
-      "export", "fail", "false", "feat", "finally", "from",
+      "class", "cond", "declare", "define", "dis", "div",
+      "do", "else", "elsecase", "elseif", "elseof", "end",
+      "export", "fail", "false", "feat", "finally", "for", "from",
       "fun", "functor", "if", "import", "in", "local",
       "lock", "meth", "mod", "not", "of", "or", "orelse",
       "prepare", "proc", "prop", "raise", "require",
@@ -92,6 +92,7 @@ class OzParser extends OzTokenParsers with PackratParsers
     | lockStatement
     | tryStatement
     | raiseStatement
+    | forStatement
     | functorStatement
     | classStatement
     | skipStatement
@@ -428,6 +429,17 @@ class OzParser extends OzTokenParsers with PackratParsers
     "raise" ~> inExpression <~ "end" ^^ RaiseExpression
   }
 
+  // For loops
+
+  lazy val forStatement: PackratParser[Statement] = deepPositioned {
+    ("for" ~> formalArg) ~ ("in" ~> expression) ~ ("do" ~> inStatement) <~ "end" ^^ {
+      case arg0 ~ listExpr ~ body0 =>
+        val (args, body) = postProcessArgsAndBody(List(arg0), body0)
+        val forProc = ProcExpression("ForProc", args, body, Nil)
+        CallStatement(RawVariable("ForAll"), List(listExpr, forProc))
+    }
+  }
+
   // Operator statement
 
   lazy val operatorStatement: PackratParser[Statement] = positioned(
@@ -579,7 +591,7 @@ class OzParser extends OzTokenParsers with PackratParsers
   }
 
   lazy val methodParamFeat: PackratParser[Expression] = positioned {
-    opt(featureNoVar <~ ":") ^^ (x => x.getOrElse(AutoFeature()))
+    opt(feature <~ ":") ^^ (x => x.getOrElse(AutoFeature()))
   }
 
   lazy val methodParamName: PackratParser[Expression] =

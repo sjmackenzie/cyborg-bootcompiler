@@ -101,4 +101,6 @@ class Builtins {
   lazy val fail = builtinByName("Exception", "fail")
 
   lazy val getProperty = builtinByName("Property", "get")
+
+  lazy val dictionaryPut = builtinByName("Dictionary", "put")
 }
